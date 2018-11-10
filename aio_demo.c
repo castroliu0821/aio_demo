@@ -76,6 +76,9 @@ static void* listen_file_notify(void* data) {
         pthread_exit(NULL);
     }
 
+    printf("info->efd = %d\r\n", info->efd);
+    printf("info->fd = %d\r\n", info->fd);
+
     ev.data.fd = info->efd;
     ev.events = EPOLLIN | EPOLLET;
 
@@ -86,11 +89,16 @@ static void* listen_file_notify(void* data) {
     }
 
     do {
+        printf("epollfd: %d\r\n", epollfd);
         ndfs = epoll_wait(epollfd, evs, 10, 0);
-        if (ndfs <= 0) {
-            printf("ndfs = %d\r\n", ndfs);
+        if (ndfs < 0) {
             perror("epoll wait failed");
             pthread_exit(NULL);
+        }
+
+        if (ndfs == 0) {
+            printf("wait zero events\r\n");
+            continue;
         }
 
         for (int i = 0; i < ndfs; i++) {
@@ -112,7 +120,6 @@ static void* listen_file_notify(void* data) {
                         printf("res = %lld\r\n", iov[j].res);
                     }
                 }
-
             }
         }
 
@@ -228,4 +235,3 @@ failed_3:
     free(ctx);
     exit(ret);
 }
-
