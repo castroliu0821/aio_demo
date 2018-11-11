@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <syscall.h>
@@ -54,12 +55,13 @@ static int eventfd(unsigned int initval, int flags)
 
 
 static void* listen_file_notify(void* data) {
-    uint64_t ready;
+    uint64_t ready = 0;
+    struct iocb* scb;
     file_info *info = data;
     struct timespec val;
     struct io_event iov[10];
     int ndfs = 0;
-    int epollfd = -1;
+    int evfd = -1;
     int n = 0;
     int events = 0;
 
@@ -70,27 +72,21 @@ static void* listen_file_notify(void* data) {
         pthread_exit(NULL);
     }
 
-    epollfd = epoll_create1(0);
-    if (epollfd < 0) {
+    evfd = epoll_create1(0);
+    if (evfd < 0) {
         perror("create epoll handle failed");
         pthread_exit(NULL);
     }
 
-    printf("info->efd = %d\r\n", info->efd);
-    printf("info->fd = %d\r\n", info->fd);
-
     ev.data.fd = info->efd;
-    ev.events = EPOLLIN | EPOLLET;
+    ev.events = EPOLLIN;
 
-    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, info->efd, &ev) == -1) {
-        printf("epollfd : %d\r\n", epollfd);
-        perror("add event failed");
+    if (epoll_ctl(evfd, EPOLL_CTL_ADD, info->efd, &ev) == -1) {
+        printf("evfd : %d\r\n", evfd);
         pthread_exit(NULL);
     }
-
-    do {
-        printf("epollfd: %d\r\n", epollfd);
-        ndfs = epoll_wait(epollfd, evs, 10, 0);
+    while (1) {
+        ndfs = epoll_wait(evfd, evs, 12, -1);
         if (ndfs < 0) {
             perror("epoll wait failed");
             pthread_exit(NULL);
@@ -102,29 +98,29 @@ static void* listen_file_notify(void* data) {
         }
 
         for (int i = 0; i < ndfs; i++) {
-            if (evs[i].data.fd == info->efd && evs[i].events == EPOLLIN) {
+            if (evs[i].data.fd == info->efd && (evs[i].events & EPOLLIN== EPOLLIN)) {
                 n = read(info->efd, &ready, sizeof(ready));
                 if (n != 8) {
                     printf("read dirty data\r\n");
                     continue;
                 }
-
-                printf("ready: %ld\r\n", ready);
-
                 while (ready > 0) {
                     val.tv_nsec = 0;
                     val.tv_sec = 0;
                     events = io_getevents(info->ctx, 1, 10, iov, &val);
                     ready -= (uint64_t) events;
                     for (int j = 0; j < events; j++) {
-                        printf("res = %lld\r\n", iov[j].res);
+                        scb =(struct iocb *)iov[j].obj;
+                        printf("buf: %s\r\n", (char *)scb->aio_buf);
+                        printf("size: %d\r\n", scb->aio_nbytes);
+                        printf("res = %lld\r\n", iov[i].res);
+                        printf("res2 = %lld\r\n", iov[i].res2);
+                        printf("errno: %d\r\n", errno);
                     }
                 }
             }
         }
-
-    } while (1);
-
+    }
     return NULL;
 }
 
@@ -146,8 +142,8 @@ int main(int argc, char *argv[])
 {
     int efd = -1;
     int ret = -1;
+    struct iocb* scb[1];
     aio_context_t *ctx = NULL;
-    struct iocb* scb = NULL;
     pthread_t tid;
     file_info info;
     char* buf = NULL;
@@ -159,7 +155,7 @@ int main(int argc, char *argv[])
 
     // create async ctx
     ctx = calloc(sizeof(aio_context_t), 1);
-    ret = io_setup(10, ctx);
+    ret = io_setup(1, ctx);
     if (ret != 0) {
         perror("io_setup failed :");
         goto failed_3;
@@ -179,8 +175,8 @@ int main(int argc, char *argv[])
         goto failed_2;
     }
 
-    // open normal file
-    info.fd = open(argv[1], O_RDONLY | __O_DIRECT);
+    // directly access file
+    info.fd = open(argv[1], O_RDONLY | O_DIRECT);
     if (info.fd < 0) {
         perror("open failed :");
         goto failed_2;
@@ -191,39 +187,44 @@ int main(int argc, char *argv[])
         perror("get file perporty failed :");
         goto failed_1;
     }
-    printf ("File size: %ld Bytes\r\n", info.f_stat.st_size);
+    printf ("file size: %ld Bytes\r\n", info.f_stat.st_size);
 
-    buf = calloc(sizeof(char), MAX_BUFF_SIZE);
-    scb = calloc(sizeof(struct iocb), 1);
+    buf = aligned_alloc(512, MAX_BUFF_SIZE);
+    memset(buf, 0, MAX_BUFF_SIZE);
 
-    scb->aio_data = (unsigned long long) (char *) &info;
-    scb->aio_buf = (unsigned long long) (char *) buf;
-    scb->aio_fildes = (unsigned int)info.fd;
-    scb->aio_flags = IOCB_FLAG_RESFD;
-    scb->aio_lio_opcode = IOCB_CMD_PREAD;
-    scb->aio_nbytes = MAX_BUFF_SIZE;
-    scb->aio_offset = 0;
-    scb->aio_resfd = (unsigned int)efd;
+    scb[0] = calloc(sizeof(struct iocb), 1);
+
+    scb[0]->aio_lio_opcode = IOCB_CMD_PREADV;
+    scb[0]->aio_rw_flags = RWF_SYNC;
+    scb[0]->aio_fildes = (uint32_t)info.fd;
+    scb[0]->aio_buf = (uint64_t) buf;
+    scb[0]->aio_nbytes = MAX_BUFF_SIZE;
+    scb[0]->aio_offset = 0;
+    scb[0]->aio_flags = IOCB_FLAG_RESFD;
+    scb[0]->aio_resfd = (unsigned int)efd;
 
     do {
-        ret = io_submit(*ctx, 1, &scb);
+        ret = io_submit(*ctx, 1, scb);
         if (ret >= 0) {
             break;
         }
-        else if (ret == EAGAIN) {
+
+        if (ret == EAGAIN) {
             usleep(1000);
             continue;
         }
-        else if (ret == ENOSYS) {
+
+        if (ret == ENOSYS) {
             perror("No system invoke");
             goto failed_1;
         }
 
+        pthread_cancel(tid);
+        perror("io_submit error");
+        break;
     } while (1);
 
     ret = pthread_join(tid, NULL);
-
-    printf("Complete..............\r\n");
 
     io_destroy(info.ctx);
 failed_1:
@@ -231,7 +232,7 @@ failed_1:
 failed_2:
     close(efd);
 failed_3:
-    free(scb);
+    free(scb[0]);
     free(ctx);
     exit(ret);
 }

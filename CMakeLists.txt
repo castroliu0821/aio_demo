@@ -38,7 +38,7 @@ LINK_LIBRARIES(${PRIVATE_DYNAMIC_LIBRARY})
 #                        complier options setting                              #
 ################################################################################
 SET(CMAKE_CXX_FLAGS "")
-SET(CMAKE_C_FLAGS   "-g -Wall")
+SET(CMAKE_C_FLAGS   "-g -Wall -D_GNU_SOURCE -DDEBUG")
 
 ################################################################################
 #                       header file configurer setting                         #
