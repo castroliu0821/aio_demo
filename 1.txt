@@ -13,6 +13,8 @@
 
 #define MAX_BUFF_SIZE 1024
 
+const char* TEXT = "THIS IS TEST TEXT!!!!!";
+
 typedef struct __file_info {
     int fd;
     int efd;
@@ -85,9 +87,7 @@ static void* listen_file_notify(void* data) {
         printf("evfd : %d\r\n", evfd);
         pthread_exit(NULL);
     }
-
-    printf("enter work thread\r\n");
-     while (1) {
+    while (1) {
         ndfs = epoll_wait(evfd, evs, 12, -1);
         if (ndfs < 0) {
             perror("epoll wait failed");
@@ -100,40 +100,25 @@ static void* listen_file_notify(void* data) {
         }
 
         for (int i = 0; i < ndfs; i++) {
-            if (evs[i].data.fd == info->efd && (evs[i].events & EPOLLIN== EPOLLIN)) {
+            if (evs[i].data.fd == info->efd && ((evs[i].events & EPOLLIN) == EPOLLIN)) {
                 n = read(info->efd, &ready, sizeof(ready));
                 if (n != 8) {
                     printf("read dirty data\r\n");
                     continue;
                 }
-
-                printf("ready: %ld\r\n", ready);
-
                 while (ready > 0) {
                     val.tv_nsec = 0;
                     val.tv_sec = 0;
                     events = io_getevents(info->ctx, 1, 10, iov, &val);
-                    printf("io_getevents:   %d\r\n", events);
                     ready -= (uint64_t) events;
                     for (int j = 0; j < events; j++) {
                         scb =(struct iocb *)iov[j].obj;
-                        printf("scb : %p\r\n", scb);
-                        printf("buf: %s\r\n", (char *)scb->aio_buf);
-
-                        printf("size: %d\r\n", scb->aio_nbytes);
-
-                        printf("res = %lld\r\n", iov[i].res);
-
-                        printf("res2 = %lld\r\n", iov[i].res2);
-
-                        printf("errno: %d\r\n", errno);
+                        printf("r buf: %s\r\n", (char *)scb->aio_buf);
                     }
                 }
             }
         }
-
     }
-
     return NULL;
 }
 
@@ -155,8 +140,8 @@ int main(int argc, char *argv[])
 {
     int efd = -1;
     int ret = -1;
-    struct iocb* scb[1];
-    aio_context_t *ctx = NULL;
+    struct iocb* scb[2];
+    aio_context_t ctx = 0;
     pthread_t tid;
     file_info info;
     char* buf = NULL;
@@ -167,13 +152,12 @@ int main(int argc, char *argv[])
     }
 
     // create async ctx
-    ctx = calloc(sizeof(aio_context_t), 1);
-    ret = io_setup(1, ctx);
+    ret = io_setup(10, &ctx);
     if (ret != 0) {
         perror("io_setup failed :");
         goto failed_3;
     }
-    info.ctx = *ctx;
+    info.ctx = ctx;
 
     // create event fd
     efd = eventfd(0, 0);;
@@ -202,44 +186,45 @@ int main(int argc, char *argv[])
     }
     printf ("file size: %ld Bytes\r\n", info.f_stat.st_size);
 
-    buf = calloc(sizeof(char), MAX_BUFF_SIZE);
-    scb[0] = calloc(sizeof(struct iocb), 1);
+    printf("size = %ld\r\n", sysconf(_SC_PAGESIZE));                // align memory boundary
+    buf = aligned_alloc(512, MAX_BUFF_SIZE);
 
-    scb[0]->aio_lio_opcode = IOCB_CMD_PREADV;
+    scb[0] = calloc(sizeof(struct iocb), 1);
+    memset(scb[0], 0, sizeof(struct iocb));
+
+    scb[0]->aio_lio_opcode = IOCB_CMD_PREAD;
     scb[0]->aio_rw_flags = RWF_SYNC;
     scb[0]->aio_fildes = (uint32_t)info.fd;
     scb[0]->aio_buf = (uint64_t) buf;
-    scb[0]->aio_nbytes = 512;
+    scb[0]->aio_nbytes = MAX_BUFF_SIZE;
     scb[0]->aio_offset = 0;
     scb[0]->aio_flags = IOCB_FLAG_RESFD;
     scb[0]->aio_resfd = (unsigned int)efd;
 
     do {
-        ret = io_submit(*ctx, 1, scb);
-        if (ret >= 0) {
+        ret = io_submit(ctx, 1, &scb[0]);
+        if (ret == -1 && errno != EAGAIN) {
+            pthread_cancel(tid);
+            perror("io_submit error");
             break;
         }
 
-        if (ret == EAGAIN) {
+        if (ret == -1 && errno == EAGAIN) {
             usleep(1000);
             continue;
         }
 
-        if (ret == ENOSYS) {
-            perror("No system invoke");
-            goto failed_1;
-        }
+        ret = 0;
+        break;
     } while (1);
-
-    ret = pthread_join(tid, NULL);
 
     io_destroy(info.ctx);
 failed_1:
+    sync();
     close(info.fd);
 failed_2:
     close(efd);
 failed_3:
     free(scb[0]);
-    free(ctx);
     exit(ret);
 }
